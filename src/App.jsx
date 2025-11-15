@@ -1,35 +1,108 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+
+function MiniMap({ bounds, pickup, dropoff, onPick, onDrop }) {
+  const ref = useRef(null)
+  const [mode, setMode] = useState('pickup') // 'pickup' | 'dropoff'
+
+  const toLatLng = (x, y, w, h) => {
+    const lat = bounds.minLat + (1 - y / h) * (bounds.maxLat - bounds.minLat)
+    const lng = bounds.minLng + (x / w) * (bounds.maxLng - bounds.minLng)
+    return { lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)) }
+  }
+
+  const toXY = (lat, lng, w, h) => {
+    const x = ((lng - bounds.minLng) / (bounds.maxLng - bounds.minLng)) * w
+    const y = (1 - (lat - bounds.minLat) / (bounds.maxLat - bounds.minLat)) * h
+    return { x, y }
+  }
+
+  const handleClick = (e) => {
+    const rect = ref.current.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+    const { lat, lng } = toLatLng(x, y, rect.width, rect.height)
+    if (mode === 'pickup') onPick({ lat, lng })
+    else onDrop({ lat, lng })
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-sm text-gray-600">Click map to set {mode}</div>
+        <div className="flex gap-1 bg-gray-100 p-1 rounded-lg">
+          <button onClick={() => setMode('pickup')} className={`px-2 py-1 rounded ${mode==='pickup'?'bg-blue-600 text-white':'text-gray-700'}`}>Pickup</button>
+          <button onClick={() => setMode('dropoff')} className={`px-2 py-1 rounded ${mode==='dropoff'?'bg-indigo-600 text-white':'text-gray-700'}`}>Dropoff</button>
+        </div>
+      </div>
+      <div ref={ref} onClick={handleClick} className="relative w-full h-56 rounded-lg border overflow-hidden bg-[url('https://images.unsplash.com/photo-1760764541302-e3955fbc6b2b?ixid=M3w3OTkxMTl8MHwxfHNlYXJjaHwxfHxjZXJhbWljJTIwcG90dGVyeSUyMGhhbmRtYWRlfGVufDB8MHx8fDE3NjMxNjc0NDN8MA&ixlib=rb-4.1.0&w=1600&auto=format&fit=crop&q=80')] bg-cover">
+        {/* Markers */}
+        {pickup?.lat && pickup?.lng && (
+          <Marker color="bg-green-600" position={pickup} bounds={bounds} refEl={ref} toXY={toXY} label="P" />
+        )}
+        {dropoff?.lat && dropoff?.lng && (
+          <Marker color="bg-red-600" position={dropoff} bounds={bounds} refEl={ref} toXY={toXY} label="D" />
+        )}
+      </div>
+      <div className="text-xs text-gray-500 mt-2">Bounds: {bounds.minLat},{bounds.minLng} → {bounds.maxLat},{bounds.maxLng}</div>
+    </div>
+  )
+}
+
+function Marker({ color, position, bounds, refEl, toXY, label }) {
+  const [xy, setXy] = useState({ x: 0, y: 0 })
+  useEffect(() => {
+    const el = refEl.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const p = toXY(position.lat, position.lng, rect.width, rect.height)
+    setXy(p)
+  }, [position, refEl, bounds])
+  return (
+    <div className="absolute" style={{ left: xy.x - 7, top: xy.y - 7 }}>
+      <div className={`h-4 w-4 rounded-full ring-2 ring-white ${color} flex items-center justify-center text-[10px] text-white`}>{label}</div>
+    </div>
+  )
+}
 
 function App() {
   const apiBase = useMemo(() => (import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'), [])
 
-  // Rider creation (simple auth-less identity for demo)
+  // Rider
   const [riderName, setRiderName] = useState('')
   const [riderPhone, setRiderPhone] = useState('')
   const [riderId, setRiderId] = useState('')
+  const [riderKey, setRiderKey] = useState('')
 
-  // Drivers
+  // Driver (current driver session for console actions)
   const [drivers, setDrivers] = useState([])
   const [driverForm, setDriverForm] = useState({ name: '', phone: '', make: '', model: '', plate: '', color: '' })
+  const [currentDriverId, setCurrentDriverId] = useState('')
+  const [currentDriverKey, setCurrentDriverKey] = useState('')
+  const [driverLocation, setDriverLocation] = useState({ lat: '', lng: '' })
 
   // Ride booking
   const [pickup, setPickup] = useState({ lat: '', lng: '' })
   const [dropoff, setDropoff] = useState({ lat: '', lng: '' })
   const [distanceKm, setDistanceKm] = useState('')
+  const [durationMin, setDurationMin] = useState('')
   const [fare, setFare] = useState('')
+  const [surge, setSurge] = useState('1.0')
   const [rides, setRides] = useState([])
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState('')
+
+  const mapBounds = { minLat: 12.80, maxLat: 13.20, minLng: 77.3, maxLng: 77.85 } // Bengaluru-ish box
 
   const notify = (msg, timeout = 3000) => {
     setMessage(msg)
     if (timeout) setTimeout(() => setMessage(''), timeout)
   }
 
-  // Fetch initial data
+  // Polling
   useEffect(() => {
-    loadDrivers()
-    loadRides()
+    loadDrivers(); loadRides()
+    const t = setInterval(() => { loadDrivers(); loadRides() }, 5000)
+    return () => clearInterval(t)
   }, [])
 
   const loadDrivers = async () => {
@@ -37,9 +110,7 @@ function App() {
       const res = await fetch(`${apiBase}/drivers`)
       const data = await res.json()
       setDrivers(data)
-    } catch (e) {
-      console.error(e)
-    }
+    } catch (e) { console.error(e) }
   }
 
   const loadRides = async () => {
@@ -47,9 +118,7 @@ function App() {
       const res = await fetch(`${apiBase}/rides`)
       const data = await res.json()
       setRides(data)
-    } catch (e) {
-      console.error(e)
-    }
+    } catch (e) { console.error(e) }
   }
 
   const createRider = async () => {
@@ -57,22 +126,16 @@ function App() {
     setLoading(true)
     try {
       const res = await fetch(`${apiBase}/riders`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: riderName, phone: riderPhone, rating: 5 }),
       })
       const data = await res.json()
       if (res.ok && data.id) {
-        setRiderId(data.id)
+        setRiderId(data.id); setRiderKey(data.api_key)
         notify('Rider created')
-      } else {
-        notify('Failed to create rider')
-      }
-    } catch (e) {
-      notify('Error creating rider')
-    } finally {
-      setLoading(false)
-    }
+      } else notify('Failed to create rider')
+    } catch { notify('Error creating rider') }
+    finally { setLoading(false) }
   }
 
   const createDriver = async () => {
@@ -81,43 +144,46 @@ function App() {
     setLoading(true)
     try {
       const res = await fetch(`${apiBase}/drivers`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name,
-          phone,
-          vehicle: { make, model, plate, color },
-          is_available: true,
-        }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, phone, vehicle: { make, model, plate, color }, is_available: true }),
       })
+      const data = await res.json()
       if (res.ok) {
         notify('Driver added')
         setDriverForm({ name: '', phone: '', make: '', model: '', plate: '', color: '' })
-        loadDrivers()
-      } else {
-        notify('Failed to add driver')
-      }
-    } catch (e) {
-      notify('Error adding driver')
-    } finally {
-      setLoading(false)
-    }
+        await loadDrivers()
+        if (data.id && data.api_key) { setCurrentDriverId(data.id); setCurrentDriverKey(data.api_key) }
+      } else notify('Failed to add driver')
+    } catch { notify('Error adding driver') }
+    finally { setLoading(false) }
   }
 
-  const estimateFare = () => {
+  const fetchFare = async () => {
+    if (!distanceKm) return estimateFareLocal()
+    try {
+      const res = await fetch(`${apiBase}/pricing/estimate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ distance_km: Number(distanceKm), duration_min: durationMin ? Number(durationMin) : undefined })
+      })
+      const data = await res.json()
+      if (res.ok && data.fare) { setFare(String(data.fare)); setSurge(String(data.surge_multiplier || 1.0)) }
+      else estimateFareLocal()
+    } catch { estimateFareLocal() }
+  }
+
+  const estimateFareLocal = () => {
     const d = parseFloat(distanceKm)
+    const dur = parseFloat(durationMin)
     if (isNaN(d)) return setFare('')
-    const est = Math.round((2.0 + 1.2 * d) * 100) / 100
-    setFare(est.toString())
+    const est = Math.round((2.0 + 1.2 * d + (isNaN(dur)?0:0.2*dur)) * 100) / 100
+    setFare(est.toString()); setSurge('1.0')
   }
 
-  useEffect(() => {
-    estimateFare()
-  }, [distanceKm])
+  useEffect(() => { fetchFare() }, [distanceKm, durationMin])
 
   const requestRide = async () => {
-    if (!riderId) return notify('Create or set a rider first')
-    if (!pickup.lat || !pickup.lng || !dropoff.lat || !dropoff.lng) return notify('Enter pickup and dropoff coordinates')
+    if (!riderId || !riderKey) return notify('Create/set a rider and API key')
+    if (!pickup.lat || !pickup.lng || !dropoff.lat || !dropoff.lng) return notify('Set pickup and dropoff')
     setLoading(true)
     try {
       const body = {
@@ -125,69 +191,71 @@ function App() {
         pickup: { lat: Number(pickup.lat), lng: Number(pickup.lng) },
         dropoff: { lat: Number(dropoff.lat), lng: Number(dropoff.lng) },
         distance_km: distanceKm ? Number(distanceKm) : undefined,
+        duration_min: durationMin ? Number(durationMin) : undefined,
         fare_estimate: fare ? Number(fare) : undefined,
         status: 'requested',
       }
       const res = await fetch(`${apiBase}/rides`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': riderKey },
         body: JSON.stringify(body),
       })
       const data = await res.json()
       if (res.ok && data.id) {
         notify('Ride requested')
-        setPickup({ lat: '', lng: '' })
-        setDropoff({ lat: '', lng: '' })
-        setDistanceKm('')
-        loadRides()
-      } else {
-        notify('Failed to request ride')
-      }
-    } catch (e) {
-      notify('Error requesting ride')
-    } finally {
-      setLoading(false)
-    }
+        setDistanceKm(''); setDurationMin('')
+        await loadRides()
+      } else notify('Failed to request ride')
+    } catch { notify('Error requesting ride') }
+    finally { setLoading(false) }
   }
 
   const assignDriver = async (rideId, driverId) => {
+    if (!currentDriverKey || !driverId || (currentDriverId && currentDriverId !== driverId)) {
+      setCurrentDriverId(driverId)
+    }
     try {
       const res = await fetch(`${apiBase}/rides/${rideId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'PATCH', headers: { 'Content-Type': 'application/json', 'X-API-Key': currentDriverKey },
         body: JSON.stringify({ driver_id: driverId, status: 'assigned' }),
       })
-      if (res.ok) {
-        notify('Driver assigned')
-        loadRides()
-      }
-    } catch (e) {
-      notify('Error assigning driver')
-    }
+      if (res.ok) { notify('Driver assigned'); loadRides() }
+      else notify('Assign failed')
+    } catch { notify('Error assigning driver') }
   }
 
-  const advanceStatus = async (ride) => {
-    const next = {
-      requested: 'assigned',
-      assigned: 'ongoing',
-      ongoing: 'completed',
-      completed: 'completed',
-      cancelled: 'cancelled',
-    }[ride.status] || 'completed'
-
+  const advanceStatus = async (ride, status) => {
+    const next = status || ({ requested: 'assigned', assigned: 'ongoing', ongoing: 'completed', completed: 'completed', cancelled: 'cancelled' }[ride.status] || 'completed')
     try {
-      const res = await fetch(`${apiBase}/rides/${ride.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: next }),
+      const headers = { 'Content-Type': 'application/json' }
+      // driver progresses, rider can cancel
+      if (next === 'cancelled') headers['X-API-Key'] = riderKey
+      else headers['X-API-Key'] = currentDriverKey
+      const res = await fetch(`${apiBase}/rides/${ride.id}`, { method: 'PATCH', headers, body: JSON.stringify({ status: next }) })
+      if (res.ok) { notify(`Ride status → ${next}`); loadRides() }
+      else notify('Update failed')
+    } catch { notify('Error updating ride') }
+  }
+
+  const updateDriverLoc = async () => {
+    if (!currentDriverId || !currentDriverKey) return notify('Set driver id & key')
+    if (!driverLocation.lat || !driverLocation.lng) return notify('Enter driver lat/lng')
+    try {
+      const res = await fetch(`${apiBase}/drivers/${currentDriverId}/location`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json', 'X-API-Key': currentDriverKey },
+        body: JSON.stringify({ lat: Number(driverLocation.lat), lng: Number(driverLocation.lng) })
       })
-      if (res.ok) {
-        notify(`Ride status → ${next}`)
-        loadRides()
-      }
-    } catch (e) {
-      notify('Error updating ride')
-    }
+      const data = await res.json(); if (data.updated) notify('Driver location updated'); else notify('No change')
+      loadDrivers()
+    } catch { notify('Error updating location') }
+  }
+
+  const findNearby = async () => {
+    if (!pickup.lat || !pickup.lng) return notify('Set pickup first')
+    try {
+      const res = await fetch(`${apiBase}/drivers/nearby?lat=${pickup.lat}&lng=${pickup.lng}&radius_km=5`)
+      const data = await res.json()
+      if (Array.isArray(data)) setDrivers(data)
+    } catch {}
   }
 
   return (
@@ -202,14 +270,15 @@ function App() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto p-6 grid md:grid-cols-3 gap-6">
-        <section className="md:col-span-1 bg-white rounded-xl shadow-sm border p-5 space-y-5">
+      <main className="max-w-6xl mx-auto p-6 grid lg:grid-cols-3 gap-6">
+        <section className="lg:col-span-1 bg-white rounded-xl shadow-sm border p-5 space-y-5">
           <h2 className="text-lg font-semibold">Your Rider</h2>
           <div className="grid grid-cols-2 gap-3">
             <input className="col-span-2 input" placeholder="Rider name" value={riderName} onChange={(e) => setRiderName(e.target.value)} />
             <input className="col-span-2 input" placeholder="Phone" value={riderPhone} onChange={(e) => setRiderPhone(e.target.value)} />
             <button disabled={loading} onClick={createRider} className="col-span-2 btn-primary">Save Rider</button>
-            <input className="col-span-2 input" placeholder="Existing Rider ID (optional)" value={riderId} onChange={(e) => setRiderId(e.target.value)} />
+            <input className="col-span-2 input" placeholder="Existing Rider ID" value={riderId} onChange={(e) => setRiderId(e.target.value)} />
+            <input className="col-span-2 input" placeholder="Rider API Key" value={riderKey} onChange={(e) => setRiderKey(e.target.value)} />
           </div>
 
           <h2 className="text-lg font-semibold pt-4">Add Driver</h2>
@@ -221,11 +290,19 @@ function App() {
             <input className="input" placeholder="Plate" value={driverForm.plate} onChange={(e) => setDriverForm({ ...driverForm, plate: e.target.value })} />
             <input className="input" placeholder="Color" value={driverForm.color} onChange={(e) => setDriverForm({ ...driverForm, color: e.target.value })} />
             <button disabled={loading} onClick={createDriver} className="col-span-2 btn-secondary">Add Driver</button>
+            <input className="col-span-2 input" placeholder="Current Driver ID" value={currentDriverId} onChange={(e) => setCurrentDriverId(e.target.value)} />
+            <input className="col-span-2 input" placeholder="Driver API Key" value={currentDriverKey} onChange={(e) => setCurrentDriverKey(e.target.value)} />
+            <div className="grid grid-cols-2 gap-2 col-span-2">
+              <input className="input" placeholder="Driver lat" value={driverLocation.lat} onChange={(e) => setDriverLocation({ ...driverLocation, lat: e.target.value })} />
+              <input className="input" placeholder="Driver lng" value={driverLocation.lng} onChange={(e) => setDriverLocation({ ...driverLocation, lng: e.target.value })} />
+              <button onClick={updateDriverLoc} className="col-span-2 btn-muted">Update Driver Location</button>
+            </div>
           </div>
         </section>
 
-        <section className="md:col-span-2 bg-white rounded-xl shadow-sm border p-5 space-y-5">
+        <section className="lg:col-span-2 bg-white rounded-xl shadow-sm border p-5 space-y-5">
           <h2 className="text-lg font-semibold">Book a Ride</h2>
+          <MiniMap bounds={mapBounds} pickup={pickup} dropoff={dropoff} onPick={(p)=>setPickup(p)} onDrop={(d)=>setDropoff(d)} />
           <div className="grid md:grid-cols-2 gap-4">
             <div className="space-y-3">
               <div className="grid grid-cols-2 gap-3">
@@ -236,22 +313,30 @@ function App() {
                 <input className="input" placeholder="Dropoff lat" value={dropoff.lat} onChange={(e) => setDropoff({ ...dropoff, lat: e.target.value })} />
                 <input className="input" placeholder="Dropoff lng" value={dropoff.lng} onChange={(e) => setDropoff({ ...dropoff, lng: e.target.value })} />
               </div>
-              <div className="grid grid-cols-3 gap-3 items-center">
-                <input className="input" placeholder="Distance (km)" value={distanceKm} onChange={(e) => setDistanceKm(e.target.value)} />
-                <input className="input" placeholder="Fare estimate" value={fare} onChange={(e) => setFare(e.target.value)} />
-                <button disabled={loading} onClick={requestRide} className="btn-primary">Request Ride</button>
+              <div className="grid grid-cols-4 gap-3 items-center">
+                <input className="input col-span-2" placeholder="Distance (km)" value={distanceKm} onChange={(e) => setDistanceKm(e.target.value)} />
+                <input className="input" placeholder="Duration (min)" value={durationMin} onChange={(e) => setDurationMin(e.target.value)} />
+                <button disabled={loading} onClick={requestRide} className="btn-primary">Request</button>
               </div>
             </div>
             <div className="space-y-3">
-              <h3 className="font-medium text-gray-700">Available Drivers</h3>
-              <div className="max-h-48 overflow-auto border rounded-lg divide-y">
-                {drivers.length === 0 && <div className="p-3 text-sm text-gray-500">No drivers yet</div>}
+              <div className="p-3 rounded-lg border bg-gray-50">
+                <div className="text-sm text-gray-600">Estimated Fare</div>
+                <div className="text-2xl font-semibold">{fare ? `$${fare}` : '-'}</div>
+                <div className="text-xs text-gray-500">Surge x{surge}</div>
+              </div>
+              <h3 className="font-medium text-gray-700">Nearby Drivers</h3>
+              <button className="btn-muted" onClick={findNearby}>Find nearby (5km)</button>
+              <div className="max-h-40 overflow-auto border rounded-lg divide-y">
+                {drivers.length === 0 && <div className="p-3 text-sm text-gray-500">No drivers</div>}
                 {drivers.map((d) => (
                   <div key={d.id || d._id} className="p-3 flex items-center justify-between gap-3">
                     <div>
                       <div className="font-medium">{d.name}</div>
                       <div className="text-xs text-gray-500">{d.vehicle?.make} {d.vehicle?.model} • {d.vehicle?.plate}</div>
+                      {d.location && <div className="text-xs text-gray-400">{d.location.lat}, {d.location.lng}</div>}
                     </div>
+                    <button className="btn-secondary" onClick={() => assignDriver(selectedRideIdForAssign(rides), d.id || d._id)}>Assign</button>
                   </div>
                 ))}
               </div>
@@ -287,8 +372,9 @@ function App() {
                       </select>
                     )}</td>
                     <td className="p-2">{r.fare_estimate ? `$${r.fare_estimate}` : '-'}</td>
-                    <td className="p-2">
-                      <button onClick={() => advanceStatus(r)} className="btn-secondary">Next status</button>
+                    <td className="p-2 flex gap-2 flex-wrap">
+                      <button onClick={() => advanceStatus(r)} className="btn-secondary">Next</button>
+                      <button onClick={() => advanceStatus(r, 'cancelled')} className="btn-muted">Cancel</button>
                     </td>
                   </tr>
                 ))}
@@ -315,6 +401,12 @@ function App() {
       `}</style>
     </div>
   )
+}
+
+function selectedRideIdForAssign(rides){
+  // choose most recent requested ride for quick assign
+  const r = rides.find(r => r.status === 'requested') || rides[0]
+  return r ? r.id : ''
 }
 
 export default App
