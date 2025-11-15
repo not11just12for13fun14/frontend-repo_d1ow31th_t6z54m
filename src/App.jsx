@@ -1,28 +1,39 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import 'leaflet/dist/leaflet.css'
+import { MapContainer, TileLayer, Marker, CircleMarker, useMapEvents } from 'react-leaflet'
+import L from 'leaflet'
 
-function MiniMap({ bounds, pickup, dropoff, onPick, onDrop }) {
-  const ref = useRef(null)
+// Fix default marker icons for Vite bundling
+// Use CDN assets to avoid file-loader issues
+// eslint-disable-next-line
+delete L.Icon.Default.prototype._getIconUrl
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+})
+
+function MiniMap({ bounds, pickup, dropoff, onPick, onDrop, drivers = [] }) {
   const [mode, setMode] = useState('pickup') // 'pickup' | 'dropoff'
+  const leafletBounds = [
+    [bounds.minLat, bounds.minLng],
+    [bounds.maxLat, bounds.maxLng],
+  ]
+  const center = [
+    (bounds.minLat + bounds.maxLat) / 2,
+    (bounds.minLng + bounds.maxLng) / 2,
+  ]
 
-  const toLatLng = (x, y, w, h) => {
-    const lat = bounds.minLat + (1 - y / h) * (bounds.maxLat - bounds.minLat)
-    const lng = bounds.minLng + (x / w) * (bounds.maxLng - bounds.minLng)
-    return { lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)) }
-  }
-
-  const toXY = (lat, lng, w, h) => {
-    const x = ((lng - bounds.minLng) / (bounds.maxLng - bounds.minLng)) * w
-    const y = (1 - (lat - bounds.minLat) / (bounds.maxLat - bounds.minLat)) * h
-    return { x, y }
-  }
-
-  const handleClick = (e) => {
-    const rect = ref.current.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const y = e.clientY - rect.top
-    const { lat, lng } = toLatLng(x, y, rect.width, rect.height)
-    if (mode === 'pickup') onPick({ lat, lng })
-    else onDrop({ lat, lng })
+  function ClickHandler() {
+    useMapEvents({
+      click(e) {
+        const { lat, lng } = e.latlng
+        const point = { lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)) }
+        if (mode === 'pickup') onPick(point)
+        else onDrop(point)
+      },
+    })
+    return null
   }
 
   return (
@@ -34,32 +45,40 @@ function MiniMap({ bounds, pickup, dropoff, onPick, onDrop }) {
           <button onClick={() => setMode('dropoff')} className={`px-2 py-1 rounded ${mode==='dropoff'?'bg-indigo-600 text-white':'text-gray-700'}`}>Dropoff</button>
         </div>
       </div>
-      <div ref={ref} onClick={handleClick} className="relative w-full h-56 rounded-lg border overflow-hidden bg-[url('https://images.unsplash.com/photo-1760764541302-e3955fbc6b2b?ixid=M3w3OTkxMTl8MHwxfHNlYXJjaHwxfHxjZXJhbWljJTIwcG90dGVyeSUyMGhhbmRtYWRlfGVufDB8MHx8fDE3NjMxNjc0NDN8MA&ixlib=rb-4.1.0&w=1600&auto=format&fit=crop&q=80')] bg-cover">
-        {/* Markers */}
-        {pickup?.lat && pickup?.lng && (
-          <Marker color="bg-green-600" position={pickup} bounds={bounds} refEl={ref} toXY={toXY} label="P" />
-        )}
-        {dropoff?.lat && dropoff?.lng && (
-          <Marker color="bg-red-600" position={dropoff} bounds={bounds} refEl={ref} toXY={toXY} label="D" />
-        )}
+      <div className="relative w-full h-64 md:h-72 rounded-lg overflow-hidden border">
+        <MapContainer
+          center={center}
+          bounds={leafletBounds}
+          maxBounds={leafletBounds}
+          scrollWheelZoom={true}
+          className="w-full h-full"
+        >
+          <TileLayer
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          />
+          <ClickHandler />
+          {pickup?.lat && pickup?.lng && (
+            <Marker position={[pickup.lat, pickup.lng]} />
+          )}
+          {dropoff?.lat && dropoff?.lng && (
+            <Marker position={[dropoff.lat, dropoff.lng]} icon={new L.Icon({
+              iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+              iconSize: [25, 41],
+              iconAnchor: [12, 41],
+              popupAnchor: [1, -34],
+              shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+              shadowSize: [41, 41],
+            })} />
+          )}
+          {Array.isArray(drivers) && drivers.map((d) => (
+            d?.location?.lat && d?.location?.lng ? (
+              <CircleMarker key={d.id || d._id} center={[d.location.lat, d.location.lng]} radius={6} pathOptions={{ color: '#10b981', fillColor: '#10b981', fillOpacity: 0.8 }} />
+            ) : null
+          ))}
+        </MapContainer>
       </div>
       <div className="text-xs text-gray-500 mt-2">Bounds: {bounds.minLat},{bounds.minLng} → {bounds.maxLat},{bounds.maxLng}</div>
-    </div>
-  )
-}
-
-function Marker({ color, position, bounds, refEl, toXY, label }) {
-  const [xy, setXy] = useState({ x: 0, y: 0 })
-  useEffect(() => {
-    const el = refEl.current
-    if (!el) return
-    const rect = el.getBoundingClientRect()
-    const p = toXY(position.lat, position.lng, rect.width, rect.height)
-    setXy(p)
-  }, [position, refEl, bounds])
-  return (
-    <div className="absolute" style={{ left: xy.x - 7, top: xy.y - 7 }}>
-      <div className={`h-4 w-4 rounded-full ring-2 ring-white ${color} flex items-center justify-center text-[10px] text-white`}>{label}</div>
     </div>
   )
 }
@@ -302,7 +321,7 @@ function App() {
 
         <section className="lg:col-span-2 bg-white rounded-xl shadow-sm border p-5 space-y-5">
           <h2 className="text-lg font-semibold">Book a Ride</h2>
-          <MiniMap bounds={mapBounds} pickup={pickup} dropoff={dropoff} onPick={(p)=>setPickup(p)} onDrop={(d)=>setDropoff(d)} />
+          <MiniMap bounds={mapBounds} pickup={pickup} dropoff={dropoff} onPick={(p)=>setPickup(p)} onDrop={(d)=>setDropoff(d)} drivers={drivers} />
           <div className="grid md:grid-cols-2 gap-4">
             <div className="space-y-3">
               <div className="grid grid-cols-2 gap-3">
