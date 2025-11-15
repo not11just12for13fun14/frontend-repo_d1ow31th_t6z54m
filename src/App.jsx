@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import 'leaflet/dist/leaflet.css'
-import { MapContainer, TileLayer, Marker, CircleMarker, useMapEvents } from 'react-leaflet'
+import { MapContainer, TileLayer, Marker, CircleMarker, useMapEvents, Polyline } from 'react-leaflet'
 import L from 'leaflet'
+import GeoSearch from './components/GeoSearch'
+import RouteOverlay from './components/RouteOverlay'
 
 // Fix default marker icons for Vite bundling
 // Use CDN assets to avoid file-loader issues
@@ -13,7 +15,7 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
 })
 
-function MiniMap({ bounds, pickup, dropoff, onPick, onDrop, drivers = [] }) {
+function MiniMap({ bounds, pickup, dropoff, onPick, onDrop, drivers = [], path = [] }) {
   const [mode, setMode] = useState('pickup') // 'pickup' | 'dropoff'
   const leafletBounds = [
     [bounds.minLat, bounds.minLng],
@@ -36,6 +38,19 @@ function MiniMap({ bounds, pickup, dropoff, onPick, onDrop, drivers = [] }) {
     return null
   }
 
+  // lightweight grid clustering for drivers (no external deps)
+  const clusters = (() => {
+    const m = new Map()
+    drivers.forEach(d => {
+      const lt = d?.location?.lat, lg = d?.location?.lng
+      if (typeof lt !== 'number' || typeof lg !== 'number') return
+      const key = `${(Math.round(lt * 100) / 100).toFixed(2)}_${(Math.round(lg * 100) / 100).toFixed(2)}`
+      if (!m.has(key)) m.set(key, { lat: Math.round(lt * 100) / 100, lng: Math.round(lg * 100) / 100, count: 0 })
+      m.get(key).count += 1
+    })
+    return Array.from(m.values())
+  })()
+
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
@@ -45,7 +60,7 @@ function MiniMap({ bounds, pickup, dropoff, onPick, onDrop, drivers = [] }) {
           <button onClick={() => setMode('dropoff')} className={`px-2 py-1 rounded ${mode==='dropoff'?'bg-indigo-600 text-white':'text-gray-700'}`}>Dropoff</button>
         </div>
       </div>
-      <div className="relative w-full h-64 md:h-72 rounded-lg overflow-hidden border">
+      <div className="relative w-full h-64 md:h-80 rounded-lg overflow-hidden border">
         <MapContainer
           center={center}
           bounds={leafletBounds}
@@ -71,10 +86,18 @@ function MiniMap({ bounds, pickup, dropoff, onPick, onDrop, drivers = [] }) {
               shadowSize: [41, 41],
             })} />
           )}
-          {Array.isArray(drivers) && drivers.map((d) => (
-            d?.location?.lat && d?.location?.lng ? (
-              <CircleMarker key={d.id || d._id} center={[d.location.lat, d.location.lng]} radius={6} pathOptions={{ color: '#10b981', fillColor: '#10b981', fillOpacity: 0.8 }} />
-            ) : null
+          {Array.isArray(path) && path.length > 0 && (
+            <RouteOverlay path={path} />
+          )}
+          {/* clustered drivers */}
+          {clusters.map((c, idx) => (
+            <>
+              <CircleMarker key={`cm-${idx}`} center={[c.lat, c.lng]} radius={Math.min(6 + c.count, 18)} pathOptions={{ color: '#10b981', fillColor: '#10b981', fillOpacity: 0.65 }} />
+              <Marker key={`mk-${idx}`} position={[c.lat, c.lng]} icon={L.divIcon({
+                className: 'driver-cluster',
+                html: `<div style="transform: translate(-50%, -50%); background:#065f46; color:white; padding:2px 6px; border-radius:9999px; font-size:11px; font-weight:600;">${c.count}</div>`
+              })} />
+            </>
           ))}
         </MapContainer>
       </div>
@@ -102,6 +125,7 @@ function App() {
   // Ride booking
   const [pickup, setPickup] = useState({ lat: '', lng: '' })
   const [dropoff, setDropoff] = useState({ lat: '', lng: '' })
+  const [routePath, setRoutePath] = useState([])
   const [distanceKm, setDistanceKm] = useState('')
   const [durationMin, setDurationMin] = useState('')
   const [fare, setFare] = useState('')
@@ -109,6 +133,9 @@ function App() {
   const [rides, setRides] = useState([])
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState('')
+  const [simulating, setSimulating] = useState(false)
+  const simIndexRef = useRef(0)
+  const simTimerRef = useRef(null)
 
   const mapBounds = { minLat: 12.80, maxLat: 13.20, minLng: 77.3, maxLng: 77.85 } // Bengaluru-ish box
 
@@ -200,6 +227,25 @@ function App() {
 
   useEffect(() => { fetchFare() }, [distanceKm, durationMin])
 
+  // When both points set, fetch route and auto distance/duration
+  useEffect(() => {
+    const valid = pickup?.lat && pickup?.lng && dropoff?.lat && dropoff?.lng
+    if (!valid) { setRoutePath([]); return }
+    const getRoute = async () => {
+      try {
+        const url = `${apiBase}/route?from_lat=${pickup.lat}&from_lng=${pickup.lng}&to_lat=${dropoff.lat}&to_lng=${dropoff.lng}`
+        const res = await fetch(url)
+        const data = await res.json()
+        if (res.ok && data?.path?.length) {
+          setRoutePath(data.path)
+          setDistanceKm(String(data.distance_km))
+          setDurationMin(String(data.duration_min))
+        }
+      } catch (e) { /* ignore */ }
+    }
+    getRoute()
+  }, [pickup.lat, pickup.lng, dropoff.lat, dropoff.lng])
+
   const requestRide = async () => {
     if (!riderId || !riderKey) return notify('Create/set a rider and API key')
     if (!pickup.lat || !pickup.lng || !dropoff.lat || !dropoff.lng) return notify('Set pickup and dropoff')
@@ -229,7 +275,8 @@ function App() {
   }
 
   const assignDriver = async (rideId, driverId) => {
-    if (!currentDriverKey || !driverId || (currentDriverId && currentDriverId !== driverId)) {
+    if (!driverId) return
+    if (!currentDriverKey || (currentDriverId && currentDriverId !== driverId)) {
       setCurrentDriverId(driverId)
     }
     try {
@@ -277,6 +324,40 @@ function App() {
     } catch {}
   }
 
+  const toggleSimulation = async () => {
+    if (simulating) {
+      setSimulating(false)
+      if (simTimerRef.current) clearInterval(simTimerRef.current)
+      simTimerRef.current = null
+      return
+    }
+    // Start simulation along the current route path
+    if (!currentDriverId || !currentDriverKey) return notify('Set active driver id & key to simulate')
+    if (!routePath || routePath.length === 0) return notify('Set pickup & dropoff to get a route first')
+    setSimulating(true)
+    simIndexRef.current = 0
+    simTimerRef.current = setInterval(async () => {
+      const idx = simIndexRef.current
+      if (!routePath[idx]) { setSimulating(false); clearInterval(simTimerRef.current); simTimerRef.current = null; return }
+      const { lat, lng } = routePath[idx]
+      try {
+        await fetch(`${apiBase}/drivers/${currentDriverId}/location`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json', 'X-API-Key': currentDriverKey },
+          body: JSON.stringify({ lat, lng })
+        })
+        loadDrivers()
+      } catch {}
+      simIndexRef.current = idx + 5 // skip a few points for speed
+      if (simIndexRef.current >= routePath.length) {
+        setSimulating(false)
+        clearInterval(simTimerRef.current)
+        simTimerRef.current = null
+      }
+    }, 1200)
+  }
+
+  useEffect(() => () => { if (simTimerRef.current) clearInterval(simTimerRef.current) }, [])
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-blue-50">
       <header className="px-6 py-4 border-b bg-white/80 backdrop-blur sticky top-0 z-10">
@@ -321,7 +402,14 @@ function App() {
 
         <section className="lg:col-span-2 bg-white rounded-xl shadow-sm border p-5 space-y-5">
           <h2 className="text-lg font-semibold">Book a Ride</h2>
-          <MiniMap bounds={mapBounds} pickup={pickup} dropoff={dropoff} onPick={(p)=>setPickup(p)} onDrop={(d)=>setDropoff(d)} drivers={drivers} />
+
+          <div className="grid md:grid-cols-2 gap-3">
+            <GeoSearch apiBase={apiBase} onSelect={(p)=>setPickup(p)} />
+            <GeoSearch apiBase={apiBase} onSelect={(p)=>setDropoff(p)} />
+          </div>
+
+          <MiniMap bounds={mapBounds} pickup={pickup} dropoff={dropoff} onPick={(p)=>setPickup(p)} onDrop={(d)=>setDropoff(d)} drivers={drivers} path={routePath} />
+
           <div className="grid md:grid-cols-2 gap-4">
             <div className="space-y-3">
               <div className="grid grid-cols-2 gap-3">
@@ -332,11 +420,12 @@ function App() {
                 <input className="input" placeholder="Dropoff lat" value={dropoff.lat} onChange={(e) => setDropoff({ ...dropoff, lat: e.target.value })} />
                 <input className="input" placeholder="Dropoff lng" value={dropoff.lng} onChange={(e) => setDropoff({ ...dropoff, lng: e.target.value })} />
               </div>
-              <div className="grid grid-cols-4 gap-3 items-center">
+              <div className="grid grid-cols-5 gap-3 items-center">
                 <input className="input col-span-2" placeholder="Distance (km)" value={distanceKm} onChange={(e) => setDistanceKm(e.target.value)} />
-                <input className="input" placeholder="Duration (min)" value={durationMin} onChange={(e) => setDurationMin(e.target.value)} />
+                <input className="input col-span-2" placeholder="Duration (min)" value={durationMin} onChange={(e) => setDurationMin(e.target.value)} />
                 <button disabled={loading} onClick={requestRide} className="btn-primary">Request</button>
               </div>
+              <button className={`btn-muted ${simulating?'opacity-70':''}`} onClick={toggleSimulation}>{simulating ? 'Stop driver simulation' : 'Simulate driver movement'}</button>
             </div>
             <div className="space-y-3">
               <div className="p-3 rounded-lg border bg-gray-50">
